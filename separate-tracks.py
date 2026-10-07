@@ -112,8 +112,9 @@ def process(job):
                 if size!=job['size']:raise ValueError('Incomplete source')
             info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','json',str(source)],timeout=30))
             duration=float(info['format']['duration'])
-            if not math.isfinite(duration) or not 0<duration<=1800:raise ValueError('Audio must be no longer than 30 minutes')
-            config=job['config'];model,quality_args=separation_settings(config)
+            config=job['config']
+            if not math.isfinite(duration) or duration<=0 or (config.get('purpose')!='studio' and duration>1800):raise ValueError('Invalid audio duration')
+            model,quality_args=separation_settings(config)
             command([sys.executable,'-m','demucs.separate','-n',model,'--float32',*quality_args,'--device',os.environ.get('SEPARATION_DEVICE','cpu'),'-o',str(root/'stems'),str(source)])
             if lost.is_set():raise RuntimeError('Lease lost')
             out=root/'prepared';out.mkdir();prefix,total=cues(out,config,duration)
