@@ -7,7 +7,7 @@ KEY=os.environ.get('TRACK_PROCESSOR_KEY','')
 PART=8*1024**2
 RATE=44100
 USER_AGENT='Plataforma-Adoracao-Processor/1.0'
-NAMES={'vocals':'Voz','drums':'Bateria','bass':'Baixo','guitar':'Guitarra','piano':'Piano','other':'Outros','click':'Click','guide':'Guia'}
+NAMES={'vocals':'01 Voz Principal','drums':'02 Bateria','bass':'03 Baixo','guitar':'04 Guitarra Violao','piano':'05 Teclas Piano','other':'06 Outros Instrumentos','click':'07 Click','guide':'08 Guia'}
 def call(action,job=None,data=None,**params):
     params={'action':action,**params}
     if job:
@@ -19,6 +19,38 @@ def call(action,job=None,data=None,**params):
 def command(args,timeout=3600):
     # Arguments stay separate; uploaded filenames never reach a shell.
     subprocess.run(args,check=True,timeout=timeout,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+def separation_settings(config):
+    refined=config.get('quality','refined')!='fast'
+    model='htdemucs_6s' if config['model']=='6' else ('htdemucs_ft' if refined else 'htdemucs')
+    return model, ['--shifts','2' if refined else '0','--overlap','0.5' if refined else '0.25','--segment','7']
+
+def presence_from_energy(energies):
+    total=max(1e-20,sum(v['energy'] for v in energies.values()))
+    result={}
+    for family,values in energies.items():
+        share=values['energy']/total
+        rms_db=10*math.log10(max(values['energy'],1e-20))
+        peak_db=20*math.log10(max(values['peak'],1e-10))
+        # Conservative activity estimate, never destructive gating or removal.
+        present=rms_db>-70 and share>=.0001 and values['activeFraction']>=.005
+        result[family]={'present':present,'rmsDb':round(rms_db,2),'peakDb':round(peak_db,2),'energyShare':round(share,6),'activeFraction':round(values['activeFraction'],6)}
+    return result
+
+def analyze_stems(root,stems):
+    import numpy as np
+    energies={}
+    for family,stem in stems.items():
+        raw=root/(family+'-analysis.f32')
+        command(['ffmpeg','-y','-i',str(stem),'-ar',str(RATE),'-ac','2','-f','f32le',str(raw)])
+        samples=np.memmap(raw,dtype='<f4',mode='r')
+        energy=0.;peak=0.;active=0;blocks=0
+        for start in range(0,len(samples),RATE//5):
+            block=samples[start:start+RATE//5].astype(np.float64)
+            power=float(np.mean(block*block));energy+=power*len(block);peak=max(peak,float(np.max(np.abs(block))));active+=power>10**(-60/10);blocks+=1
+        energies[family]={'energy':energy/max(1,len(samples)),'peak':peak,'activeFraction':active/max(1,blocks)}
+        del samples;raw.unlink()
+    return presence_from_energy(energies)
+
 def grid(config,duration):
     beats=2 if config['meter']=='6/8' else int(config['meter'].split('/')[0])
     beat=60/config['bpm']; prefix=beats*beat
@@ -81,12 +113,15 @@ def process(job):
             info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','json',str(source)],timeout=30))
             duration=float(info['format']['duration'])
             if not math.isfinite(duration) or not 0<duration<=1800:raise ValueError('Audio must be no longer than 30 minutes')
-            config=job['config'];model='htdemucs_6s' if config['model']=='6' else 'htdemucs'
-            command([sys.executable,'-m','demucs.separate','-n',model,'--float32','--shifts','0','--device',os.environ.get('SEPARATION_DEVICE','cpu'),'-o',str(root/'stems'),str(source)])
+            config=job['config'];model,quality_args=separation_settings(config)
+            command([sys.executable,'-m','demucs.separate','-n',model,'--float32',*quality_args,'--device',os.environ.get('SEPARATION_DEVICE','cpu'),'-o',str(root/'stems'),str(source)])
             if lost.is_set():raise RuntimeError('Lease lost')
             out=root/'prepared';out.mkdir();prefix,total=cues(out,config,duration)
             files=[]
-            for family in ['vocals','drums','bass','other']+(['guitar','piano'] if model.endswith('6s') else []):
+            families=['vocals','drums','bass','other']+(['guitar','piano'] if model.endswith('6s') else [])
+            stems={family:root/'stems'/model/source.stem/(family+'.wav') for family in families}
+            analysis=analyze_stems(root,stems)
+            for family in families:
                 stem=root/'stems'/model/source.stem/(family+'.wav');target=out/(NAMES[family]+'.wav')
                 # Identical prefix and sample count on all musical stems; no independent stretching.
                 delay=round(prefix*RATE)
@@ -95,13 +130,15 @@ def process(job):
             files.extend([('click',out/'Click.wav'),('guide',out/'Guia.wav')])
             archive=out/'Tracks.zip'
             with zipfile.ZipFile(archive,'w',zipfile.ZIP_STORED,allowZip64=True) as z:
-                for _,path in files:z.write(path,path.name)
+                for family,path in files:
+                    if family not in analysis or analysis[family]['present']:z.write(path,NAMES[family]+path.suffix)
+                z.writestr('Analise-das-faixas.json',json.dumps(analysis,ensure_ascii=False,indent=2))
                 z.writestr('LEIA-ME.txt','Faixas estimadas por IA. PCM24 nos instrumentos, PCM16 no click/guia, 44.1kHz estéreo. Um compasso inicial. BPM constante: revise o sincronismo. Click e guia devem ir apenas para o retorno esquerdo.\n')
             files.append(('zip',archive))
             for family,path in files:
                 if lost.is_set():raise RuntimeError('Lease lost')
                 # Stable ASCII output names allow safe download headers.
-                safe={'vocals':'Voz','drums':'Bateria','bass':'Baixo','guitar':'Guitarra','piano':'Piano','other':'Outros','click':'Click','guide':'Guia','zip':'Tracks'}[family]+path.suffix
+                safe=(NAMES.get(family) or 'Tracks')+path.suffix
                 f=call('begin-output',job,{'name':safe,'family':family,'size':path.stat().st_size})
                 if f['ready']:continue
                 parts=[]
@@ -111,7 +148,7 @@ def process(job):
                         if lost.is_set():raise RuntimeError('Lease lost')
                         parts.append(call('output-part',job,chunk,file=f['id'],part=index));index+=1
                 call('complete-output',job,{'file':f['id'],'parts':parts})
-            call('done',job,{})
+            call('done',job,{'analysis':analysis,'quality':config.get('quality','refined'),'processorVersion':2})
     except Exception as e:
         try:call('failed',job,{'message':'Não foi possível separar esta gravação. Confira formato, duração, espaço e conexão do processador.'})
         except Exception:pass
