@@ -8,4 +8,5 @@ WORKDIR /app
 COPY separate-tracks.py runpod-handler.py /app/
 RUN useradd --create-home --uid 10001 processor && chmod -R a+rX /opt/models /app
 USER processor
+WORKDIR /home/processor
 CMD ["python", "-u", "/app/runpod-handler.py"]
