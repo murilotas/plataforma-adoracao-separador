@@ -16,6 +16,7 @@ def handler(request):
     if not separator.BASE.startswith('https://') or not separator.KEY:
         raise RuntimeError('Missing platform configuration')
     completed = 0
+    finished = False
     try:
         # Bound each invocation. The platform dispatches any remaining queue on release.
         for _ in range(3):
@@ -25,10 +26,13 @@ def handler(request):
             job['wake'] = wake
             separator.process(job)
             completed += 1
+        finished = True
         return {'processed': completed}
     finally:
         # Never wait idle or poll forever. Webhook is the fallback for crashes/timeouts.
-        separator.call('release', data={}, wake=wake)
+        # Failed invocations are released by the signed terminal webhook, with backoff.
+        if finished:
+            separator.call('release', data={}, wake=wake)
 
 if __name__ == '__main__':
     import torch
