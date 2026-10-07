@@ -6,6 +6,7 @@ BASE=os.environ.get('PLATFORM_URL','').rstrip('/')
 KEY=os.environ.get('TRACK_PROCESSOR_KEY','')
 PART=8*1024**2
 RATE=44100
+USER_AGENT='Plataforma-Adoracao-Processor/1.0'
 NAMES={'vocals':'Voz','drums':'Bateria','bass':'Baixo','guitar':'Guitarra','piano':'Piano','other':'Outros','click':'Click','guide':'Guia'}
 def call(action,job=None,data=None,**params):
     params={'action':action,**params}
@@ -13,7 +14,7 @@ def call(action,job=None,data=None,**params):
         params.update(id=job['id'],lease=job['lease'])
         if job.get('wake'): params['wake']=job['wake']
     raw=isinstance(data,bytes)
-    request=urllib.request.Request(BASE+'/api/separation-worker?'+urllib.parse.urlencode(params),data=data if raw else (json.dumps(data).encode() if data is not None else None),headers={'Authorization':'Bearer '+KEY,'Content-Type':'application/octet-stream' if raw else 'application/json'})
+    request=urllib.request.Request(BASE+'/api/separation-worker?'+urllib.parse.urlencode(params),data=data if raw else (json.dumps(data).encode() if data is not None else None),headers={'Authorization':'Bearer '+KEY,'User-Agent':USER_AGENT,'Content-Type':'application/octet-stream' if raw else 'application/json'})
     with urllib.request.urlopen(request,timeout=120) as r:return json.load(r)
 def command(args,timeout=3600):
     # Arguments stay separate; uploaded filenames never reach a shell.
@@ -70,7 +71,7 @@ def process(job):
         with tempfile.TemporaryDirectory(prefix='pa-separation-') as temp:
             root=pathlib.Path(temp);source=root/('source'+pathlib.Path(job['name']).suffix.lower())
             url=BASE+'/api/separation-worker?'+urllib.parse.urlencode({'action':'source','id':job['id'],'lease':job['lease']})
-            with urllib.request.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+KEY}),timeout=120) as r,source.open('wb') as dest:
+            with urllib.request.urlopen(urllib.request.Request(url,headers={'Authorization':'Bearer '+KEY,'User-Agent':USER_AGENT}),timeout=120) as r,source.open('wb') as dest:
                 size=0
                 while chunk:=r.read(1024**2):
                     size+=len(chunk)
